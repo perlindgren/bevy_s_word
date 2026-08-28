@@ -2,5 +2,6 @@
     "cSpell.ignoreWords": [
         "Pickable",
         "Srgba"
-    ]
+    ],
+    "editor.formatOnSave": true
 }

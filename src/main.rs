@@ -6,7 +6,10 @@ fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
         .add_systems(Startup, (setup, brick::setup))
-        .add_systems(Update, brick::rotate_system)
+        .add_systems(
+            Update,
+            (brick::rotate_system, brick::flip_faces_system).chain(),
+        )
         .run();
 }
 
