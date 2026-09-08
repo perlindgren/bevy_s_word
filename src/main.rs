@@ -23,7 +23,11 @@ fn main() {
         .insert_resource(Gravity::ZERO)
         .add_tween_systems(
             PostUpdate,
-            bevy_tween::component_tween_system::<brick::FlipAngleZ>(),
+            (
+                bevy_tween::component_tween_system::<brick::FlipAngleX>(),
+                bevy_tween::component_tween_system::<brick::FlipAngleY>(),
+                bevy_tween::component_tween_system::<brick::FlipAngleZ>(),
+            ),
         )
         .add_systems(Startup, (setup, brick::setup))
         .add_systems(Update, (brick::flip_faces_system, toggle_physics_debug))

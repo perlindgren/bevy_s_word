@@ -1,6 +1,9 @@
 use avian2d::prelude::*;
 use bevy::prelude::*;
-use bevy_tween::{combinator::tween, prelude::*};
+use bevy_tween::{
+    combinator::{parallel, tween},
+    prelude::*,
+};
 use rand::Rng;
 use std::f32::consts::{PI, TAU};
 use std::time::Duration;
@@ -26,6 +29,46 @@ impl Interpolator for FlipAngleZ {
 /// Constructor for [`FlipAngleZ`]
 pub fn flip_angle_z(start: f32, end: f32) -> FlipAngleZ {
     FlipAngleZ { start, end }
+}
+
+/// [`Interpolator`] for [`FlipAngle::x`].
+#[derive(Debug, Clone, Copy)]
+pub struct FlipAngleX {
+    pub start: f32,
+    pub end: f32,
+}
+
+impl Interpolator for FlipAngleX {
+    type Item = FlipAngle;
+
+    fn interpolate(&self, item: &mut Self::Item, value: f32, _previous_value: f32) {
+        item.x = self.start.lerp(self.end, value);
+    }
+}
+
+/// Constructor for [`FlipAngleX`]
+pub fn flip_angle_x(start: f32, end: f32) -> FlipAngleX {
+    FlipAngleX { start, end }
+}
+
+/// [`Interpolator`] for [`FlipAngle::y`].
+#[derive(Debug, Clone, Copy)]
+pub struct FlipAngleY {
+    pub start: f32,
+    pub end: f32,
+}
+
+impl Interpolator for FlipAngleY {
+    type Item = FlipAngle;
+
+    fn interpolate(&self, item: &mut Self::Item, value: f32, _previous_value: f32) {
+        item.y = self.start.lerp(self.end, value);
+    }
+}
+
+/// Constructor for [`FlipAngleY`]
+pub fn flip_angle_y(start: f32, end: f32) -> FlipAngleY {
+    FlipAngleY { start, end }
 }
 
 #[derive(Component)]
@@ -56,6 +99,14 @@ pub struct FlipAngle {
 struct DragTracker {
     pub was_dragged: bool,
 }
+
+/// Tracks the entity driving a brick's idle continuous spin, so it can be
+/// stopped before it fights the click-triggered flip animation.
+#[derive(Component)]
+struct SpinAnimation(Entity);
+
+/// How long the click-triggered flip animation takes.
+const FLIP_DURATION: Duration = Duration::from_millis(900);
 
 /// Side length, in pixels, of a brick's square collision box.
 const BRICK_SIZE: f32 = 64.0;
@@ -229,7 +280,11 @@ fn brick(
             },
         )
         .observe(
-            |mut click: On<Pointer<Release>>, mut query: Query<&mut DragTracker>| {
+            |mut click: On<Pointer<Release>>,
+             mut commands: Commands,
+             mut query_drag: Query<&mut DragTracker>,
+             query_angle: Query<&FlipAngle>,
+             query_spin: Query<&SpinAnimation>| {
                 // Read event details
                 println!(
                     "Entity {:?} was released by pointer {:?}",
@@ -237,20 +292,17 @@ fn brick(
                     click.pointer_id
                 );
 
-                if let Ok(mut drag_tracker) = query.get_mut(click.event_target()) {
+                let entity = click.event_target();
+                if let Ok(mut drag_tracker) = query_drag.get_mut(entity) {
                     if !drag_tracker.was_dragged {
                         println!("Click.");
-                        // let tween = Tween::new(
-                        //     EaseFunction::QuadraticOut,
-                        //     Duration::from_millis(150), // Fast, snappy flip
-                        //     TransformScaleLens {
-                        //         start: transform.scale,
-                        //         end: Vec3::new(-1.0, 1.0, 1.0),
-                        //     },
-                        // );
-
-                        // // Insert Animator to override or replace the current scale
-                        // commands.entity(player_entity).insert(Animator::new(tween));
+                        if let Ok(angle) = query_angle.get(entity) {
+                            // Stop the idle spin so it doesn't fight the flip.
+                            if let Ok(spin) = query_spin.get(entity) {
+                                commands.entity(spin.0).despawn();
+                            }
+                            flip_brick(&mut commands, entity, angle);
+                        }
                     }
                     drag_tracker.was_dragged = false;
                 } else {
@@ -266,14 +318,51 @@ fn brick(
     // Continuously spins FlipAngle::z at a constant rate; since start and end are
     // exactly one full turn apart, the repeat loop is seamless.
     let target = entity.into_target();
-    commands
+    let spin_entity = commands
         .animation()
         .repeat(Repeat::Infinitely)
         .insert(tween(
             Duration::from_secs_f32(TAU / Z_SPIN_SPEED),
             EaseKind::Linear,
             target.with(flip_angle_z(z_start, z_start + TAU)),
-        ));
+        ))
+        .id();
+    commands.entity(entity).insert(SpinAnimation(spin_entity));
+}
+
+// Rotates x by 2 full turns and y by 1 full turn, landing on whichever face
+// (front/back) isn't currently showing, plus a 180° roll on z for flair.
+fn flip_brick(commands: &mut Commands, entity: Entity, angle: &FlipAngle) {
+    let x_start = angle.x;
+    let y_start = angle.y;
+    let z_start = angle.z;
+
+    // Mirrors flip_faces_system's facing check to decide which way to land.
+    let currently_facing_camera = angle.y.cos() * angle.x.cos() > 0.0;
+    let y_landing_phase = if currently_facing_camera { PI } else { 0.0 };
+
+    let x_end = x_start + (0.0 - x_start).rem_euclid(TAU) + 2.0 * TAU;
+    let y_end = y_start + (y_landing_phase - y_start).rem_euclid(TAU) + TAU;
+    let z_end = z_start + PI;
+
+    let target = entity.into_target();
+    commands.animation().insert(parallel((
+        tween(
+            FLIP_DURATION,
+            EaseKind::QuadraticInOut,
+            target.with(flip_angle_x(x_start, x_end)),
+        ),
+        tween(
+            FLIP_DURATION,
+            EaseKind::QuadraticInOut,
+            target.with(flip_angle_y(y_start, y_end)),
+        ),
+        tween(
+            FLIP_DURATION,
+            EaseKind::QuadraticInOut,
+            target.with(flip_angle_z(z_start, z_end)),
+        ),
+    )));
 }
 
 // An orthographic camera can't distinguish a true 3D rotation of a flat
