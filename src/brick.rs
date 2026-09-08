@@ -1,9 +1,31 @@
 use bevy::prelude::*;
-use bevy_tween::{
-    combinator::{parallel, tween},
-    prelude::*,
-};
+use bevy_tween::{combinator::tween, prelude::*};
+use rand::Rng;
 use std::f32::consts::{PI, TAU};
+use std::time::Duration;
+
+/// Radians per second the in-plane spin (`FlipAngle::z`) rotates at, driven by the tween below.
+const Z_SPIN_SPEED: f32 = 0.2;
+
+/// [`Interpolator`] for [`FlipAngle::z`], mirroring `bevy_tween`'s built-in `AngleZ`.
+#[derive(Debug, Clone, Copy)]
+pub struct FlipAngleZ {
+    pub start: f32,
+    pub end: f32,
+}
+
+impl Interpolator for FlipAngleZ {
+    type Item = FlipAngle;
+
+    fn interpolate(&self, item: &mut Self::Item, value: f32, _previous_value: f32) {
+        item.z = self.start.lerp(self.end, value);
+    }
+}
+
+/// Constructor for [`FlipAngleZ`]
+pub fn flip_angle_z(start: f32, end: f32) -> FlipAngleZ {
+    FlipAngleZ { start, end }
+}
 
 #[derive(Component)]
 pub struct Brick;
@@ -34,25 +56,41 @@ struct DragTracker {
     pub was_dragged: bool,
 }
 
-pub fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
+/// Number of bricks spawned at random positions within the window.
+const BRICK_COUNT: usize = 4;
+
+pub fn setup(mut commands: Commands, asset_server: Res<AssetServer>, windows: Query<&Window>) {
     let front = asset_server.load("sprites/Button.png");
     let back = asset_server.load("sprites/Button.png");
     let font = asset_server.load("fonts/JameGem08_2026-Regular.ttf");
 
-    for i in 0..4 {
+    let (half_width, half_height) = windows
+        .single()
+        .map(|window| (window.width() / 2.0, window.height() / 2.0))
+        .unwrap_or((640.0, 360.0));
+
+    let mut rng = rand::rng();
+    for i in 0..BRICK_COUNT {
+        let x = rng.random_range(-half_width..half_width);
+        let y = rng.random_range(-half_height..half_height);
+        let brick_color = Color::srgb(
+            rng.random_range(0.5..1.0),
+            rng.random_range(0.5..1.0),
+            rng.random_range(0.5..1.0),
+        );
         brick(
             &mut commands,
             front.clone(),
             back.clone(),
             font.clone().into(),
-            Color::WHITE,
+            brick_color,
             Color::BLACK,
             'A',
-            Transform::from_xyz((i - 2) as f32 * 200.0, 0.0, i as f32 * 0.1),
+            Transform::from_xyz(x, y, i as f32 * 0.1),
             FlipAngle {
                 x: 0.0,
                 y: PI,
-                z: i as f32 * TAU / 4.0,
+                z: i as f32 * TAU / BRICK_COUNT as f32,
             },
         );
     }
@@ -69,7 +107,9 @@ fn brick(
     transform: Transform,
     angle: FlipAngle,
 ) {
-    commands
+    let z_start = angle.z;
+
+    let entity = commands
         .spawn((
             Brick,
             angle,
@@ -136,21 +176,6 @@ fn brick(
                 drag.propagate(false);
             },
         )
-        // .observe(
-        //     |mut click: On<Pointer<Click>>, mut query: Query<&mut DragTracker>| {
-        //         // Read event details
-        //         println!(
-        //             "Entity {:?} was clicked by pointer {:?}",
-        //             click.event_target(),
-        //             click.pointer_id
-        //         );
-        //         if let Some(mut drag_tracker) = query.single_mut().ok() {
-        //             drag_tracker.was_dragged = true;
-        //         }
-        //         // If you want to prevent this click from bubbling up to parent entities:
-        //         click.propagate(true);
-        //     },
-        // )
         .observe(
             |mut click: On<Pointer<Release>>, mut query: Query<&mut DragTracker>| {
                 // Read event details
@@ -183,20 +208,20 @@ fn brick(
                 // If you want to prevent this click from bubbling up to parent entities:
                 click.propagate(true);
             },
-        );
-}
+        )
+        .id();
 
-pub fn rotate_system(time: Res<Time>, mut query: Query<&mut FlipAngle, With<Brick>>) {
-    for mut angle in &mut query {
-        // Rotation speed: radians per second
-        let x_speed = 0.0;
-        let y_speed = 0.0;
-        let z_speed = 0.2;
-
-        angle.x += x_speed * time.delta_secs();
-        angle.y += y_speed * time.delta_secs();
-        angle.z += z_speed * time.delta_secs();
-    }
+    // Continuously spins FlipAngle::z at a constant rate; since start and end are
+    // exactly one full turn apart, the repeat loop is seamless.
+    let target = entity.into_target();
+    commands
+        .animation()
+        .repeat(Repeat::Infinitely)
+        .insert(tween(
+            Duration::from_secs_f32(TAU / Z_SPIN_SPEED),
+            EaseKind::Linear,
+            target.with(flip_angle_z(z_start, z_start + TAU)),
+        ));
 }
 
 // An orthographic camera can't distinguish a true 3D rotation of a flat
@@ -231,43 +256,3 @@ pub fn flip_faces_system(
         }
     }
 }
-
-// for i in 0..1 {
-//     commands
-//         .spawn((
-//             Brick,
-//             Sprite {
-//                 image: image.clone(),
-//                 // Tint the sprite blue using Srgba (Standard RGB with Alpha)
-//                 color: Color::Srgba(Srgba::new(0.0, 0.0, 0.5 + i as f32 / 5.0, 1.0)),
-//                 ..default()
-//             },
-//             Transform::from_xyz(i as f32 * 200.0 - 400.0, 0.0, 0 as f32),
-//             Pickable::default(), // Enables picking detection for the backend
-//         ))
-//         .with_children(|parent| {
-//             // 3. Spawn the Text2d as a child so it sits on top of the sprite
-//             parent.spawn((
-//                 Text2d::new("H"),
-//                 TextFont {
-//                     font: asset_server.load("fonts/JameGem08_2026-Regular.ttf").into(),
-//                     font_size: FontSize::Px(0.0), // Note: Bevy 0.19 requires FontSize::Px
-//                     ..default()
-//                 },
-//                 TextColor(Color::WHITE),
-//                 // Offset the text relative to the sprite (slightly forward on the Z axis)
-//                 Transform::from_xyz(0.0, 0.0, 0.1),
-//                 TextLayout::justify(Justify::Center),
-//             ));
-//         })
-//         // Use the modern `On<Event>` wrapper to completely bypass `Trigger`
-//         .observe(
-//             |drag: On<Pointer<Drag>>, mut query: Query<&mut Transform>| {
-//                 // The event target entity is safely accessed directly from the listener property
-//                 if let Ok(mut transform) = query.get_mut(drag.event_target()) {
-//                     transform.translation.x += drag.delta.x;
-//                     transform.translation.y -= drag.delta.y;
-//                 }
-//             },
-//         );
-// }

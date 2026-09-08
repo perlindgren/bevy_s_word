@@ -6,11 +6,12 @@ mod brick;
 fn main() {
     App::new()
         .add_plugins((DefaultPlugins, DefaultTweenPlugins::default()))
-        .add_systems(Startup, (setup, brick::setup))
-        .add_systems(
-            Update,
-            (brick::rotate_system, brick::flip_faces_system).chain(),
+        .add_tween_systems(
+            PostUpdate,
+            bevy_tween::component_tween_system::<brick::FlipAngleZ>(),
         )
+        .add_systems(Startup, (setup, brick::setup))
+        .add_systems(Update, brick::flip_faces_system)
         .run();
 }
 
