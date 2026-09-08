@@ -11,7 +11,7 @@ fn main() {
             bevy_tween::component_tween_system::<brick::FlipAngleZ>(),
         )
         .add_systems(Startup, (setup, brick::setup))
-        .add_systems(Update, brick::flip_faces_system)
+        .add_systems(Update, (brick::movement_system, brick::flip_faces_system))
         .run();
 }
 

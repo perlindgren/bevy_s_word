@@ -56,8 +56,24 @@ struct DragTracker {
     pub was_dragged: bool,
 }
 
+#[derive(Component, Default)]
+pub struct Velocity(pub Vec2);
+
+/// Half-extents of the area bricks move and bounce within.
+#[derive(Resource, Clone, Copy)]
+pub struct Borders {
+    pub x: f32,
+    pub y: f32,
+}
+
 /// Number of bricks spawned at random positions within the window.
-const BRICK_COUNT: usize = 4;
+const BRICK_COUNT: usize = 10;
+
+/// Fraction of the window kept clear on each side as a spawn/collision margin.
+const BORDER_MARGIN_FRACTION: f32 = 0.1;
+
+/// Maximum speed, in pixels/second, a brick can spawn with.
+const MAX_SPEED: f32 = 100.0;
 
 pub fn setup(mut commands: Commands, asset_server: Res<AssetServer>, windows: Query<&Window>) {
     let front = asset_server.load("sprites/Button.png");
@@ -68,16 +84,25 @@ pub fn setup(mut commands: Commands, asset_server: Res<AssetServer>, windows: Qu
         .single()
         .map(|window| (window.width() / 2.0, window.height() / 2.0))
         .unwrap_or((640.0, 360.0));
+    let border_x = half_width * (1.0 - BORDER_MARGIN_FRACTION);
+    let border_y = half_height * (1.0 - BORDER_MARGIN_FRACTION);
+    commands.insert_resource(Borders {
+        x: border_x,
+        y: border_y,
+    });
 
     let mut rng = rand::rng();
     for i in 0..BRICK_COUNT {
-        let x = rng.random_range(-half_width..half_width);
-        let y = rng.random_range(-half_height..half_height);
+        let x = rng.random_range(-border_x..border_x);
+        let y = rng.random_range(-border_y..border_y);
         let brick_color = Color::srgb(
             rng.random_range(0.5..1.0),
             rng.random_range(0.5..1.0),
             rng.random_range(0.5..1.0),
         );
+        let angle_rad = rng.random_range(0.0..TAU);
+        let speed = rng.random_range(0.0..MAX_SPEED);
+        let velocity = Vec2::new(angle_rad.cos(), angle_rad.sin()) * speed;
         brick(
             &mut commands,
             front.clone(),
@@ -92,7 +117,35 @@ pub fn setup(mut commands: Commands, asset_server: Res<AssetServer>, windows: Qu
                 y: PI,
                 z: i as f32 * TAU / BRICK_COUNT as f32,
             },
+            velocity,
         );
+    }
+}
+
+pub fn movement_system(
+    time: Res<Time>,
+    borders: Res<Borders>,
+    mut query: Query<(&mut Transform, &mut Velocity), With<Brick>>,
+) {
+    for (mut transform, mut velocity) in &mut query {
+        transform.translation.x += velocity.0.x * time.delta_secs();
+        transform.translation.y += velocity.0.y * time.delta_secs();
+
+        if transform.translation.x > borders.x {
+            transform.translation.x = borders.x;
+            velocity.0.x = -velocity.0.x;
+        } else if transform.translation.x < -borders.x {
+            transform.translation.x = -borders.x;
+            velocity.0.x = -velocity.0.x;
+        }
+
+        if transform.translation.y > borders.y {
+            transform.translation.y = borders.y;
+            velocity.0.y = -velocity.0.y;
+        } else if transform.translation.y < -borders.y {
+            transform.translation.y = -borders.y;
+            velocity.0.y = -velocity.0.y;
+        }
     }
 }
 
@@ -106,6 +159,7 @@ fn brick(
     text: char,
     transform: Transform,
     angle: FlipAngle,
+    velocity: Vec2,
 ) {
     let z_start = angle.z;
 
@@ -113,6 +167,7 @@ fn brick(
         .spawn((
             Brick,
             angle,
+            Velocity(velocity),
             DragTracker::default(),
             Visibility::default(),
             transform,
