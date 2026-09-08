@@ -1,10 +1,11 @@
 use bevy::prelude::*;
+use bevy_tween::prelude::*;
 
 mod brick;
 
 fn main() {
     App::new()
-        .add_plugins(DefaultPlugins)
+        .add_plugins((DefaultPlugins, DefaultTweenPlugins::default()))
         .add_systems(Startup, (setup, brick::setup))
         .add_systems(
             Update,
