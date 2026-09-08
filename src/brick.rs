@@ -1,3 +1,4 @@
+use avian2d::prelude::*;
 use bevy::prelude::*;
 use bevy_tween::{combinator::tween, prelude::*};
 use rand::Rng;
@@ -56,15 +57,11 @@ struct DragTracker {
     pub was_dragged: bool,
 }
 
-#[derive(Component, Default)]
-pub struct Velocity(pub Vec2);
+/// Side length, in pixels, of a brick's square collision box.
+const BRICK_SIZE: f32 = 64.0;
 
-/// Half-extents of the area bricks move and bounce within.
-#[derive(Resource, Clone, Copy)]
-pub struct Borders {
-    pub x: f32,
-    pub y: f32,
-}
+/// Thickness of the invisible static walls bounding the play area.
+const WALL_THICKNESS: f32 = 50.0;
 
 /// Number of bricks spawned at random positions within the window.
 const BRICK_COUNT: usize = 10;
@@ -86,10 +83,7 @@ pub fn setup(mut commands: Commands, asset_server: Res<AssetServer>, windows: Qu
         .unwrap_or((640.0, 360.0));
     let border_x = half_width * (1.0 - BORDER_MARGIN_FRACTION);
     let border_y = half_height * (1.0 - BORDER_MARGIN_FRACTION);
-    commands.insert_resource(Borders {
-        x: border_x,
-        y: border_y,
-    });
+    spawn_walls(&mut commands, border_x, border_y);
 
     let mut rng = rand::rng();
     for i in 0..BRICK_COUNT {
@@ -122,31 +116,29 @@ pub fn setup(mut commands: Commands, asset_server: Res<AssetServer>, windows: Qu
     }
 }
 
-pub fn movement_system(
-    time: Res<Time>,
-    borders: Res<Borders>,
-    mut query: Query<(&mut Transform, &mut Velocity), With<Brick>>,
-) {
-    for (mut transform, mut velocity) in &mut query {
-        transform.translation.x += velocity.0.x * time.delta_secs();
-        transform.translation.y += velocity.0.y * time.delta_secs();
-
-        if transform.translation.x > borders.x {
-            transform.translation.x = borders.x;
-            velocity.0.x = -velocity.0.x;
-        } else if transform.translation.x < -borders.x {
-            transform.translation.x = -borders.x;
-            velocity.0.x = -velocity.0.x;
-        }
-
-        if transform.translation.y > borders.y {
-            transform.translation.y = borders.y;
-            velocity.0.y = -velocity.0.y;
-        } else if transform.translation.y < -borders.y {
-            transform.translation.y = -borders.y;
-            velocity.0.y = -velocity.0.y;
-        }
-    }
+// Static colliders surrounding the play area so bricks bounce back inward.
+fn spawn_walls(commands: &mut Commands, border_x: f32, border_y: f32) {
+    let wall = (RigidBody::Static, Restitution::new(1.0), Friction::ZERO);
+    commands.spawn((
+        wall.clone(),
+        Collider::rectangle(WALL_THICKNESS, border_y * 2.0 + WALL_THICKNESS * 2.0),
+        Transform::from_xyz(-border_x - WALL_THICKNESS / 2.0, 0.0, 0.0),
+    ));
+    commands.spawn((
+        wall.clone(),
+        Collider::rectangle(WALL_THICKNESS, border_y * 2.0 + WALL_THICKNESS * 2.0),
+        Transform::from_xyz(border_x + WALL_THICKNESS / 2.0, 0.0, 0.0),
+    ));
+    commands.spawn((
+        wall.clone(),
+        Collider::rectangle(border_x * 2.0 + WALL_THICKNESS * 2.0, WALL_THICKNESS),
+        Transform::from_xyz(0.0, border_y + WALL_THICKNESS / 2.0, 0.0),
+    ));
+    commands.spawn((
+        wall,
+        Collider::rectangle(border_x * 2.0 + WALL_THICKNESS * 2.0, WALL_THICKNESS),
+        Transform::from_xyz(0.0, -border_y - WALL_THICKNESS / 2.0, 0.0),
+    ));
 }
 
 fn brick(
@@ -167,10 +159,15 @@ fn brick(
         .spawn((
             Brick,
             angle,
-            Velocity(velocity),
             DragTracker::default(),
             Visibility::default(),
             transform,
+            RigidBody::Dynamic,
+            Collider::rectangle(BRICK_SIZE, BRICK_SIZE),
+            LinearVelocity(velocity),
+            Restitution::new(1.0),
+            Friction::ZERO,
+            LockedAxes::ROTATION_LOCKED,
         ))
         .with_children(|parent| {
             // Front face: sprite + text, shown while facing the camera
