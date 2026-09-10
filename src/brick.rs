@@ -98,6 +98,14 @@ pub struct FlipAngle {
 #[derive(Component, Default)]
 struct DragTracker {
     pub was_dragged: bool,
+    /// True while the pointer is holding and dragging this brick.
+    dragging: bool,
+    /// The brick's velocity before the drag began, restored on release.
+    saved_velocity: Option<Vec2>,
+    /// Whether the idle spin was running when the drag began.
+    had_spin: bool,
+    /// The brick's rigid body type before the drag began, restored on release.
+    saved_rigid_body: Option<RigidBody>,
 }
 
 /// Tracks the entity driving a brick's idle continuous spin, so it can be
@@ -285,17 +293,44 @@ fn brick(
         .observe(
             |mut drag: On<Pointer<Drag>>,
              mut query_transform: Query<&mut Transform>,
-             mut query_drag: Query<&mut DragTracker>| {
-                // The event target entity is safely accessed directly from the listener property
-                println!(
-                    "Entity {:?} was dragged by pointer {:?}",
-                    drag.event_target(),
-                    drag.pointer_id
-                );
-                if let Ok(mut drag_tracker) = query_drag.get_mut(drag.event_target()) {
-                    drag_tracker.was_dragged = true;
+             mut query_tracker: Query<&mut DragTracker>,
+             query_rb: Query<&RigidBody>,
+             mut query_vel: Query<&mut LinearVelocity>,
+             query_parent: Query<&ChildOf>,
+             query_spin: Query<&SpinAnimation>,
+             mut commands: Commands| {
+                // Act on the brick itself (it owns the collider and velocity) rather
+                // than the pickable child face the pointer is on.
+                let target = drag.event_target();
+                let brick = query_parent
+                    .get(target)
+                    .map(|parent| parent.0)
+                    .unwrap_or(target);
+                if let Ok(mut tracker) = query_tracker.get_mut(brick) {
+                    tracker.was_dragged = true;
+                    if !tracker.dragging {
+                        tracker.dragging = true;
+                        // Freeze the brick's movement for the duration of the drag.
+                        if let Ok(mut vel) = query_vel.get_mut(brick) {
+                            tracker.saved_velocity = Some(vel.0);
+                            vel.0 = Vec2::ZERO;
+                        }
+                        // Make the brick kinematic so it stays in the collision
+                        // system (shoving other bricks out of the way) but can't be
+                        // pushed or gain velocity from collisions itself.
+                        if let Ok(rb) = query_rb.get(brick) {
+                            tracker.saved_rigid_body = Some(*rb);
+                        }
+                        commands.entity(brick).insert(RigidBody::Kinematic);
+                        // Stop the idle spin so the brick holds still while positioned.
+                        tracker.had_spin = query_spin.get(brick).is_ok();
+                        if let Ok(spin) = query_spin.get(brick) {
+                            commands.entity(spin.0).despawn();
+                        }
+                        commands.entity(brick).remove::<SpinAnimation>();
+                    }
                 }
-                if let Ok(mut transform) = query_transform.get_mut(drag.event_target()) {
+                if let Ok(mut transform) = query_transform.get_mut(brick) {
                     transform.translation.x += drag.delta.x;
                     transform.translation.y -= drag.delta.y;
                 };
@@ -305,9 +340,11 @@ fn brick(
         .observe(
             |mut click: On<Pointer<Release>>,
              mut commands: Commands,
-             mut query_drag: Query<&mut DragTracker>,
+             mut query_tracker: Query<&mut DragTracker>,
              query_angle: Query<&FlipAngle>,
-             query_spin: Query<&SpinAnimation>| {
+             query_parent: Query<&ChildOf>,
+             query_spin: Query<&SpinAnimation>,
+             mut query_vel: Query<&mut LinearVelocity>| {
                 // Read event details
                 println!(
                     "Entity {:?} was released by pointer {:?}",
@@ -315,19 +352,43 @@ fn brick(
                     click.pointer_id
                 );
 
-                let entity = click.event_target();
-                if let Ok(mut drag_tracker) = query_drag.get_mut(entity) {
-                    if !drag_tracker.was_dragged {
+                let target = click.event_target();
+                let brick = query_parent
+                    .get(target)
+                    .map(|parent| parent.0)
+                    .unwrap_or(target);
+                if let Ok(mut tracker) = query_tracker.get_mut(brick) {
+                    if tracker.dragging {
+                        // Drag ended: put the brick back under the physics
+                        // simulation's control, then resume its movement and,
+                        // if it was running before the drag, its idle spin.
+                        if let Some(rigid_body) = tracker.saved_rigid_body.take() {
+                            commands.entity(brick).insert(rigid_body);
+                        }
+                        if let Some(velocity) = tracker.saved_velocity.take() {
+                            if let Ok(mut vel) = query_vel.get_mut(brick) {
+                                vel.0 = velocity;
+                            }
+                        }
+                        if tracker.had_spin && query_spin.get(brick).is_err() {
+                            if let Ok(angle) = query_angle.get(brick) {
+                                spawn_spin_animation(&mut commands, brick, angle.z);
+                            }
+                        }
+                        tracker.dragging = false;
+                        tracker.had_spin = false;
+                    } else if !tracker.was_dragged {
                         println!("Click.");
-                        if let Ok(angle) = query_angle.get(entity) {
+                        if let Ok(angle) = query_angle.get(brick) {
                             // Stop the idle spin so it doesn't fight the flip.
-                            if let Ok(spin) = query_spin.get(entity) {
+                            if let Ok(spin) = query_spin.get(brick) {
                                 commands.entity(spin.0).despawn();
                             }
-                            flip_brick(&mut commands, entity, angle);
+                            commands.entity(brick).remove::<SpinAnimation>();
+                            flip_brick(&mut commands, brick, &angle);
                         }
                     }
-                    drag_tracker.was_dragged = false;
+                    tracker.was_dragged = false;
                 } else {
                     println!("no track")
                 }
@@ -340,7 +401,13 @@ fn brick(
 
     // Continuously spins FlipAngle::z at a constant rate; since start and end are
     // exactly one full turn apart, the repeat loop is seamless.
-    let target = entity.into_target();
+    spawn_spin_animation(commands, entity, z_start);
+}
+
+/// Spawns the idle continuous-spin animation for `brick` and records its
+/// animation entity on the brick so it can be stopped (and later re-spawned).
+fn spawn_spin_animation(commands: &mut Commands, brick: Entity, z_start: f32) {
+    let target = brick.into_target();
     let spin_entity = commands
         .animation()
         .repeat(Repeat::Infinitely)
@@ -350,7 +417,7 @@ fn brick(
             target.with(flip_angle_z(z_start, z_start + TAU)),
         ))
         .id();
-    commands.entity(entity).insert(SpinAnimation(spin_entity));
+    commands.entity(brick).insert(SpinAnimation(spin_entity));
 }
 
 // Rotates x by 2 full turns and y by 1 full turn, landing on whichever face
