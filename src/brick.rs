@@ -106,6 +106,20 @@ struct DragTracker {
     had_spin: bool,
     /// The brick's rigid body type before the drag began, restored on release.
     saved_rigid_body: Option<RigidBody>,
+    /// The brick's position when the drag began; restored if the brick is
+    /// dropped outside the walls.
+    saved_translation: Vec3,
+}
+
+/// Inner-edge boundaries of the static walls that bound the play area.
+#[derive(Resource)]
+pub struct PlayAreaBounds {
+    /// The left/right walls' inner edges sit at `x = ±half_width`.
+    pub half_width: f32,
+    /// The top wall's inner edge sits at `y = top`.
+    pub top: f32,
+    /// The bottom wall's inner edge sits at `y = bottom` (a negative value).
+    pub bottom: f32,
 }
 
 /// Tracks the entity driving a brick's idle continuous spin, so it can be
@@ -117,7 +131,7 @@ struct SpinAnimation(Entity);
 const FLIP_DURATION: Duration = Duration::from_millis(900);
 
 /// Side length, in pixels, of a brick's square collision box.
-const BRICK_SIZE: f32 = 64.0;
+const BRICK_SIZE: f32 = 128.0;
 
 /// Thickness of the invisible static walls bounding the play area.
 const WALL_THICKNESS: f32 = 50.0;
@@ -148,6 +162,11 @@ pub fn setup(mut commands: Commands, asset_server: Res<AssetServer>, windows: Qu
     let top_border = half_height * (1.0 - BORDER_MARGIN_FRACTION);
     let bottom_border = half_height * (1.0 - 2.0 * BOTTOM_MARGIN_FRACTION);
     spawn_walls(&mut commands, border_x, top_border, bottom_border);
+    commands.insert_resource(PlayAreaBounds {
+        half_width: border_x,
+        top: top_border,
+        bottom: -bottom_border,
+    });
 
     // Bottom slots strip: centered (in Y) between the window bottom and the
     // bottom wall's inner edge, and offset from the left edge by the same side
@@ -310,6 +329,11 @@ fn brick(
                     tracker.was_dragged = true;
                     if !tracker.dragging {
                         tracker.dragging = true;
+                        // Remember where the brick started so a drop outside the
+                        // walls can send it back here.
+                        if let Ok(transform) = query_transform.get(brick) {
+                            tracker.saved_translation = transform.translation;
+                        }
                         // Freeze the brick's movement for the duration of the drag.
                         if let Ok(mut vel) = query_vel.get_mut(brick) {
                             tracker.saved_velocity = Some(vel.0);
@@ -341,6 +365,8 @@ fn brick(
             |mut click: On<Pointer<Release>>,
              mut commands: Commands,
              mut query_tracker: Query<&mut DragTracker>,
+             mut query_transform: Query<&mut Transform>,
+             bounds: Res<PlayAreaBounds>,
              query_angle: Query<&FlipAngle>,
              query_parent: Query<&ChildOf>,
              query_spin: Query<&SpinAnimation>,
@@ -359,6 +385,19 @@ fn brick(
                     .unwrap_or(target);
                 if let Ok(mut tracker) = query_tracker.get_mut(brick) {
                     if tracker.dragging {
+                        // A drop outside the walls isn't valid: put the brick
+                        // back where it was when the drag started.
+                        if let Ok(mut transform) = query_transform.get_mut(brick) {
+                            let t = transform.translation;
+                            let half = BRICK_SIZE / 2.0;
+                            let outside = t.x - half < -bounds.half_width
+                                || t.x + half > bounds.half_width
+                                || t.y + half > bounds.top
+                                || t.y - half < bounds.bottom;
+                            if outside {
+                                transform.translation = tracker.saved_translation;
+                            }
+                        }
                         // Drag ended: put the brick back under the physics
                         // simulation's control, then resume its movement and,
                         // if it was running before the drag, its idle spin.
