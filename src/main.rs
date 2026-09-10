@@ -31,6 +31,9 @@ fn main() {
         )
         .add_systems(Startup, (setup, brick::setup))
         .add_systems(Update, (brick::flip_faces_system, toggle_physics_debug))
+        // After physics has moved the brick for this frame, advance the
+        // return animation so the eased lerp wins the transform write.
+        .add_systems(Last, brick::return_animation_system)
         .run();
 }
 

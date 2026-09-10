@@ -96,7 +96,7 @@ pub struct FlipAngle {
 }
 
 #[derive(Component, Default)]
-struct DragTracker {
+pub struct DragTracker {
     pub was_dragged: bool,
     /// True while the pointer is holding and dragging this brick.
     dragging: bool,
@@ -125,10 +125,25 @@ pub struct PlayAreaBounds {
 /// Tracks the entity driving a brick's idle continuous spin, so it can be
 /// stopped before it fights the click-triggered flip animation.
 #[derive(Component)]
-struct SpinAnimation(Entity);
+pub struct SpinAnimation(Entity);
+
+/// A brick dropped outside the walls, animating back to its pre-drag position.
+#[derive(Component)]
+pub struct ReturnAnimation {
+    /// The brick's position at the moment of the out-of-bounds drop.
+    from: Vec3,
+    /// The brick's position when the drag began (the return target).
+    to: Vec3,
+    /// Seconds elapsed since the return animation started.
+    elapsed: f32,
+}
 
 /// How long the click-triggered flip animation takes.
 const FLIP_DURATION: Duration = Duration::from_millis(900);
+
+/// How long a brick dropped outside the walls takes to animate back to its
+/// pre-drag position.
+const RETURN_DURATION: Duration = Duration::from_millis(500);
 
 /// Side length, in pixels, of a brick's square collision box.
 const BRICK_SIZE: f32 = 128.0;
@@ -329,25 +344,35 @@ fn brick(
                     tracker.was_dragged = true;
                     if !tracker.dragging {
                         tracker.dragging = true;
+                        // A return animation from a previous out-of-bounds drop
+                        // is superseded by this new drag.
+                        commands.entity(brick).remove::<ReturnAnimation>();
                         // Remember where the brick started so a drop outside the
                         // walls can send it back here.
                         if let Ok(transform) = query_transform.get(brick) {
                             tracker.saved_translation = transform.translation;
                         }
-                        // Freeze the brick's movement for the duration of the drag.
+                        // Freeze the brick's movement for the duration of the drag,
+                        // keeping any velocity already saved for a pending return.
                         if let Ok(mut vel) = query_vel.get_mut(brick) {
-                            tracker.saved_velocity = Some(vel.0);
+                            if tracker.saved_velocity.is_none() {
+                                tracker.saved_velocity = Some(vel.0);
+                            }
                             vel.0 = Vec2::ZERO;
                         }
                         // Make the brick kinematic so it stays in the collision
                         // system (shoving other bricks out of the way) but can't be
                         // pushed or gain velocity from collisions itself.
                         if let Ok(rb) = query_rb.get(brick) {
-                            tracker.saved_rigid_body = Some(*rb);
+                            if tracker.saved_rigid_body.is_none() {
+                                tracker.saved_rigid_body = Some(*rb);
+                            }
                         }
                         commands.entity(brick).insert(RigidBody::Kinematic);
                         // Stop the idle spin so the brick holds still while positioned.
-                        tracker.had_spin = query_spin.get(brick).is_ok();
+                        if query_spin.get(brick).is_ok() {
+                            tracker.had_spin = true;
+                        }
                         if let Ok(spin) = query_spin.get(brick) {
                             commands.entity(spin.0).despawn();
                         }
@@ -365,7 +390,7 @@ fn brick(
             |mut click: On<Pointer<Release>>,
              mut commands: Commands,
              mut query_tracker: Query<&mut DragTracker>,
-             mut query_transform: Query<&mut Transform>,
+             query_transform: Query<&Transform>,
              bounds: Res<PlayAreaBounds>,
              query_angle: Query<&FlipAngle>,
              query_parent: Query<&ChildOf>,
@@ -385,37 +410,50 @@ fn brick(
                     .unwrap_or(target);
                 if let Ok(mut tracker) = query_tracker.get_mut(brick) {
                     if tracker.dragging {
-                        // A drop outside the walls isn't valid: put the brick
-                        // back where it was when the drag started.
-                        if let Ok(mut transform) = query_transform.get_mut(brick) {
+                        // A drop outside the walls isn't valid: the brick will
+                        // animate back to where it was when the drag started.
+                        let outside = if let Ok(transform) = query_transform.get(brick) {
                             let t = transform.translation;
                             let half = BRICK_SIZE / 2.0;
-                            let outside = t.x - half < -bounds.half_width
+                            t.x - half < -bounds.half_width
                                 || t.x + half > bounds.half_width
                                 || t.y + half > bounds.top
-                                || t.y - half < bounds.bottom;
-                            if outside {
-                                transform.translation = tracker.saved_translation;
+                                || t.y - half < bounds.bottom
+                        } else {
+                            false
+                        };
+                        if outside {
+                            if let Ok(transform) = query_transform.get(brick) {
+                                commands.entity(brick).insert(ReturnAnimation {
+                                    from: transform.translation,
+                                    to: tracker.saved_translation,
+                                    elapsed: 0.0,
+                                });
                             }
-                        }
-                        // Drag ended: put the brick back under the physics
-                        // simulation's control, then resume its movement and,
-                        // if it was running before the drag, its idle spin.
-                        if let Some(rigid_body) = tracker.saved_rigid_body.take() {
-                            commands.entity(brick).insert(rigid_body);
-                        }
-                        if let Some(velocity) = tracker.saved_velocity.take() {
-                            if let Ok(mut vel) = query_vel.get_mut(brick) {
-                                vel.0 = velocity;
+                            // The brick stays kinematic with zero velocity until
+                            // the return animation completes; that also resumes
+                            // its saved velocity and idle spin (see
+                            // return_animation_system).
+                        } else {
+                            // Drag ended: put the brick back under the physics
+                            // simulation's control, then resume its movement and,
+                            // if it was running before the drag, its idle spin.
+                            if let Some(rigid_body) = tracker.saved_rigid_body.take() {
+                                commands.entity(brick).insert(rigid_body);
                             }
-                        }
-                        if tracker.had_spin && query_spin.get(brick).is_err() {
-                            if let Ok(angle) = query_angle.get(brick) {
-                                spawn_spin_animation(&mut commands, brick, angle.z);
+                            if let Some(velocity) = tracker.saved_velocity.take() {
+                                if let Ok(mut vel) = query_vel.get_mut(brick) {
+                                    vel.0 = velocity;
+                                }
                             }
+                            if tracker.had_spin && query_spin.get(brick).is_err() {
+                                if let Ok(angle) = query_angle.get(brick) {
+                                    spawn_spin_animation(&mut commands, brick, angle.z);
+                                }
+                            }
+                            tracker.had_spin = false;
                         }
                         tracker.dragging = false;
-                        tracker.had_spin = false;
                     } else if !tracker.was_dragged {
                         println!("Click.");
                         if let Ok(angle) = query_angle.get(brick) {
@@ -523,6 +561,48 @@ pub fn flip_faces_system(
                     Visibility::Hidden
                 };
             }
+        }
+    }
+}
+
+/// Smoothly animates a brick that was dropped outside the walls back to its
+/// pre-drag position over [`RETURN_DURATION`], then hands it back to the
+/// physics simulation: restoring its saved velocity, rigid body and (if it was
+/// running before the drag) its idle spin.
+pub fn return_animation_system(
+    time: Res<Time>,
+    mut commands: Commands,
+    mut animations: Query<(Entity, &mut ReturnAnimation, &mut Transform)>,
+    mut trackers: Query<&mut DragTracker>,
+    query_spin: Query<&SpinAnimation>,
+    query_angle: Query<&FlipAngle>,
+    mut query_vel: Query<&mut LinearVelocity>,
+) {
+    for (brick, mut ret, mut transform) in &mut animations {
+        ret.elapsed += time.delta_secs();
+        let t = (ret.elapsed / RETURN_DURATION.as_secs_f32()).min(1.0);
+        // Ease in and out so the return accelerates away from and settles into
+        // the original position.
+        let eased = t * t * (3.0 - 2.0 * t);
+        transform.translation = ret.from.lerp(ret.to, eased);
+        if t >= 1.0 {
+            if let Ok(mut tracker) = trackers.get_mut(brick) {
+                if let Some(rigid_body) = tracker.saved_rigid_body.take() {
+                    commands.entity(brick).insert(rigid_body);
+                }
+                if let Some(velocity) = tracker.saved_velocity.take() {
+                    if let Ok(mut vel) = query_vel.get_mut(brick) {
+                        vel.0 = velocity;
+                    }
+                }
+                if tracker.had_spin && query_spin.get(brick).is_err() {
+                    if let Ok(angle) = query_angle.get(brick) {
+                        spawn_spin_animation(&mut commands, brick, angle.z);
+                    }
+                }
+                tracker.had_spin = false;
+            }
+            commands.entity(brick).remove::<ReturnAnimation>();
         }
     }
 }
