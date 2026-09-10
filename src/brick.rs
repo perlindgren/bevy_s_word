@@ -122,6 +122,16 @@ pub struct PlayAreaBounds {
     pub bottom: f32,
 }
 
+/// A single drop slot: a [`SLOT_SIZE`] × [`SLOT_SIZE`] box centered at
+/// `position`. The brick occupying it, if any, is recorded in `occupied`.
+#[derive(Resource)]
+pub struct Slot {
+    /// The slot's center.
+    pub position: Vec3,
+    /// The brick currently occupying the slot, if any.
+    pub occupied: Option<Entity>,
+}
+
 /// Tracks the entity driving a brick's idle continuous spin, so it can be
 /// stopped before it fights the click-triggered flip animation.
 #[derive(Component)]
@@ -164,6 +174,12 @@ const BOTTOM_MARGIN_FRACTION: f32 = 0.3;
 /// Maximum speed, in pixels/second, a brick can spawn with.
 const MAX_SPEED: f32 = 100.0;
 
+/// Side length, in pixels, of the drop slot's square drop area.
+const SLOT_SIZE: f32 = 100.0;
+
+/// Half the slot size, used as the drop-area radius from the slot center.
+const SLOT_HALF: f32 = SLOT_SIZE / 2.0;
+
 pub fn setup(mut commands: Commands, asset_server: Res<AssetServer>, windows: Query<&Window>) {
     let front = asset_server.load("sprites/Button.png");
     let back = asset_server.load("sprites/Button.png");
@@ -189,9 +205,15 @@ pub fn setup(mut commands: Commands, asset_server: Res<AssetServer>, windows: Qu
     let slots = asset_server.load("sprites/slot.png");
     let slots_y = (-half_height + -bottom_border) / 2.0;
     let slots_x = -border_x;
+    let slot_position = Vec3::new(slots_x, slots_y, -1.0);
+    commands.insert_resource(Slot {
+        position: slot_position,
+        occupied: None,
+    });
     commands.spawn((
         Sprite {
             image: slots,
+            custom_size: Some(Vec2::new(SLOT_SIZE, SLOT_SIZE)),
             ..default()
         },
         Transform::from_xyz(slots_x, slots_y, -1.0),
@@ -332,6 +354,7 @@ fn brick(
              mut query_vel: Query<&mut LinearVelocity>,
              query_parent: Query<&ChildOf>,
              query_spin: Query<&SpinAnimation>,
+             mut slot: ResMut<Slot>,
              mut commands: Commands| {
                 // Act on the brick itself (it owns the collider and velocity) rather
                 // than the pickable child face the pointer is on.
@@ -344,6 +367,12 @@ fn brick(
                     tracker.was_dragged = true;
                     if !tracker.dragging {
                         tracker.dragging = true;
+                        // If this brick owns the slot, release it: the brick is
+                        // being moved, so the slot reads as free until a brick
+                        // drops in again.
+                        if slot.occupied == Some(brick) {
+                            slot.occupied = None;
+                        }
                         // A return animation from a previous out-of-bounds drop
                         // is superseded by this new drag.
                         commands.entity(brick).remove::<ReturnAnimation>();
@@ -390,11 +419,12 @@ fn brick(
             |mut click: On<Pointer<Release>>,
              mut commands: Commands,
              mut query_tracker: Query<&mut DragTracker>,
-             query_transform: Query<&Transform>,
+             mut query_transform: Query<&mut Transform>,
              bounds: Res<PlayAreaBounds>,
              query_angle: Query<&FlipAngle>,
              query_parent: Query<&ChildOf>,
              query_spin: Query<&SpinAnimation>,
+             mut slot: ResMut<Slot>,
              mut query_vel: Query<&mut LinearVelocity>| {
                 // Read event details
                 println!(
@@ -410,26 +440,66 @@ fn brick(
                     .unwrap_or(target);
                 if let Ok(mut tracker) = query_tracker.get_mut(brick) {
                     if tracker.dragging {
-                        // A drop outside the walls isn't valid: the brick will
-                        // animate back to where it was when the drag started.
-                        let outside = if let Ok(transform) = query_transform.get(brick) {
-                            let t = transform.translation;
-                            let half = BRICK_SIZE / 2.0;
-                            t.x - half < -bounds.half_width
-                                || t.x + half > bounds.half_width
-                                || t.y + half > bounds.top
-                                || t.y - half < bounds.bottom
+                        let t = if let Ok(transform) = query_transform.get(brick) {
+                            transform.translation
                         } else {
-                            false
+                            Vec3::ZERO
                         };
-                        if outside {
-                            if let Ok(transform) = query_transform.get(brick) {
+                        let half = BRICK_SIZE / 2.0;
+                        let outside = t.x - half < -bounds.half_width
+                            || t.x + half > bounds.half_width
+                            || t.y + half > bounds.top
+                            || t.y - half < bounds.bottom;
+                        // A drop over the slot is valid even though the slot sits
+                        // outside the walls (below the bottom border), so it is
+                        // tested before the out-of-bounds check.
+                        let on_slot = (t.x - slot.position.x).abs() <= SLOT_HALF
+                            && (t.y - slot.position.y).abs() <= SLOT_HALF;
+                        // The slot is free for this brick if it's empty or if this
+                        // brick is the one currently occupying it (re-dropped).
+                        let can_park = match slot.occupied {
+                            Some(occupied) => occupied == brick,
+                            None => true,
+                        };
+                        if on_slot {
+                            if can_park {
+                                // Snap into the slot and freeze: a static body
+                                // keeps colliding but can't move; zero velocity,
+                                // no idle spin, and settle flat at angle 0.
+                                if let Ok(mut transform) = query_transform.get_mut(brick) {
+                                    transform.translation = slot.position;
+                                }
+                                commands.entity(brick).insert(RigidBody::Static);
+                                if let Ok(mut vel) = query_vel.get_mut(brick) {
+                                    vel.0 = Vec2::ZERO;
+                                }
+                                if let Ok(spin) = query_spin.get(brick) {
+                                    commands.entity(spin.0).despawn();
+                                }
+                                commands.entity(brick).remove::<SpinAnimation>();
+                                tracker.had_spin = false;
+                                slot.occupied = Some(brick);
+                                if let Ok(angle) = query_angle.get(brick) {
+                                    settle_brick(&mut commands, brick, &angle);
+                                }
+                            } else {
+                                // Occupied by a different brick: the occupant
+                                // stays; the incoming brick returns to where the
+                                // drag began (see return_animation_system).
                                 commands.entity(brick).insert(ReturnAnimation {
-                                    from: transform.translation,
+                                    from: t,
                                     to: tracker.saved_translation,
                                     elapsed: 0.0,
                                 });
                             }
+                        } else if outside {
+                            // A drop outside the walls isn't valid: the brick will
+                            // animate back to where it was when the drag started.
+                            commands.entity(brick).insert(ReturnAnimation {
+                                from: t,
+                                to: tracker.saved_translation,
+                                elapsed: 0.0,
+                            });
                             // The brick stays kinematic with zero velocity until
                             // the return animation completes; that also resumes
                             // its saved velocity and idle spin (see
@@ -511,6 +581,38 @@ fn flip_brick(commands: &mut Commands, entity: Entity, angle: &FlipAngle) {
     let x_end = x_start + (0.0 - x_start).rem_euclid(TAU) + 2.0 * TAU;
     let y_end = y_start + (y_landing_phase - y_start).rem_euclid(TAU) + TAU;
     let z_end = z_start + PI;
+
+    let target = entity.into_target();
+    commands.animation().insert(parallel((
+        tween(
+            FLIP_DURATION,
+            EaseKind::QuadraticInOut,
+            target.with(flip_angle_x(x_start, x_end)),
+        ),
+        tween(
+            FLIP_DURATION,
+            EaseKind::QuadraticInOut,
+            target.with(flip_angle_y(y_start, y_end)),
+        ),
+        tween(
+            FLIP_DURATION,
+            EaseKind::QuadraticInOut,
+            target.with(flip_angle_z(z_start, z_end)),
+        ),
+    )));
+}
+
+/// Settle a parked brick flat and front-facing ("angle 0"): rotate each axis to
+/// the nearest full turn so [`flip_faces_system`] renders it unsquished, front
+/// face showing, with zero roll.
+fn settle_brick(commands: &mut Commands, entity: Entity, angle: &FlipAngle) {
+    let x_start = angle.x;
+    let y_start = angle.y;
+    let z_start = angle.z;
+
+    let x_end = x_start + (0.0 - x_start).rem_euclid(TAU);
+    let y_end = y_start + (0.0 - y_start).rem_euclid(TAU);
+    let z_end = z_start + (0.0 - z_start).rem_euclid(TAU);
 
     let target = entity.into_target();
     commands.animation().insert(parallel((
