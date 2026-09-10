@@ -120,6 +120,10 @@ const BRICK_COUNT: usize = 10;
 /// Fraction of the window kept clear on each side as a spawn/collision margin.
 const BORDER_MARGIN_FRACTION: f32 = 0.1;
 
+/// Gap between the bottom wall and the bottom of the window, as a fraction of
+/// the full window height (kept larger than the side/top margins).
+const BOTTOM_MARGIN_FRACTION: f32 = 0.3;
+
 /// Maximum speed, in pixels/second, a brick can spawn with.
 const MAX_SPEED: f32 = 100.0;
 
@@ -133,13 +137,28 @@ pub fn setup(mut commands: Commands, asset_server: Res<AssetServer>, windows: Qu
         .map(|window| (window.width() / 2.0, window.height() / 2.0))
         .unwrap_or((640.0, 360.0));
     let border_x = half_width * (1.0 - BORDER_MARGIN_FRACTION);
-    let border_y = half_height * (1.0 - BORDER_MARGIN_FRACTION);
-    spawn_walls(&mut commands, border_x, border_y);
+    let top_border = half_height * (1.0 - BORDER_MARGIN_FRACTION);
+    let bottom_border = half_height * (1.0 - 2.0 * BOTTOM_MARGIN_FRACTION);
+    spawn_walls(&mut commands, border_x, top_border, bottom_border);
+
+    // Bottom slots strip: centered (in Y) between the window bottom and the
+    // bottom wall's inner edge, and offset from the left edge by the same side
+    // margin as the walls.
+    let slots = asset_server.load("sprites/slot.png");
+    let slots_y = (-half_height + -bottom_border) / 2.0;
+    let slots_x = -border_x;
+    commands.spawn((
+        Sprite {
+            image: slots,
+            ..default()
+        },
+        Transform::from_xyz(slots_x, slots_y, -1.0),
+    ));
 
     let mut rng = rand::rng();
     for i in 0..BRICK_COUNT {
         let x = rng.random_range(-border_x..border_x);
-        let y = rng.random_range(-border_y..border_y);
+        let y = rng.random_range(-bottom_border..top_border);
         let brick_color = Color::srgb(
             rng.random_range(0.5..1.0),
             rng.random_range(0.5..1.0),
@@ -168,27 +187,31 @@ pub fn setup(mut commands: Commands, asset_server: Res<AssetServer>, windows: Qu
 }
 
 // Static colliders surrounding the play area so bricks bounce back inward.
-fn spawn_walls(commands: &mut Commands, border_x: f32, border_y: f32) {
+// The top and bottom borders may differ (e.g. extra room at the bottom); the
+// side walls span the full height between them and are re-centered to match.
+fn spawn_walls(commands: &mut Commands, border_x: f32, top_border: f32, bottom_border: f32) {
     let wall = (RigidBody::Static, Restitution::new(1.0), Friction::ZERO);
+    let side_height = top_border + bottom_border + WALL_THICKNESS * 2.0;
+    let side_center_y = (top_border - bottom_border) / 2.0;
     commands.spawn((
         wall.clone(),
-        Collider::rectangle(WALL_THICKNESS, border_y * 2.0 + WALL_THICKNESS * 2.0),
-        Transform::from_xyz(-border_x - WALL_THICKNESS / 2.0, 0.0, 0.0),
+        Collider::rectangle(WALL_THICKNESS, side_height),
+        Transform::from_xyz(-border_x - WALL_THICKNESS / 2.0, side_center_y, 0.0),
     ));
     commands.spawn((
         wall.clone(),
-        Collider::rectangle(WALL_THICKNESS, border_y * 2.0 + WALL_THICKNESS * 2.0),
-        Transform::from_xyz(border_x + WALL_THICKNESS / 2.0, 0.0, 0.0),
+        Collider::rectangle(WALL_THICKNESS, side_height),
+        Transform::from_xyz(border_x + WALL_THICKNESS / 2.0, side_center_y, 0.0),
     ));
     commands.spawn((
         wall.clone(),
         Collider::rectangle(border_x * 2.0 + WALL_THICKNESS * 2.0, WALL_THICKNESS),
-        Transform::from_xyz(0.0, border_y + WALL_THICKNESS / 2.0, 0.0),
+        Transform::from_xyz(0.0, top_border + WALL_THICKNESS / 2.0, 0.0),
     ));
     commands.spawn((
         wall,
         Collider::rectangle(border_x * 2.0 + WALL_THICKNESS * 2.0, WALL_THICKNESS),
-        Transform::from_xyz(0.0, -border_y - WALL_THICKNESS / 2.0, 0.0),
+        Transform::from_xyz(0.0, -bottom_border - WALL_THICKNESS / 2.0, 0.0),
     ));
 }
 
