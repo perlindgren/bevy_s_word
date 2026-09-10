@@ -1,0 +1,25 @@
+// Folder-specific settings
+//
+// For a full list of overridable settings, and general information on folder-specific settings,
+// see the documentation: https://zed.dev/docs/configuring-zed#settings-files
+{
+  "assistant": {
+    "version": "2",
+    "provider": {
+      "name": "ollama",
+      "low_speed_timeout_in_seconds": 60
+    },
+    "default_model": "qwen3.8:27b"
+  },
+  "language_models": {
+    "ollama": {
+      "api_url": "http://localhost:11434",
+      "available_models": [
+        {
+          "name": "qwen3.8:27b",
+          "max_tokens": 32768
+        }
+      ]
+    }
+  }
+}
