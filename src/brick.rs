@@ -124,12 +124,18 @@ pub struct PlayAreaBounds {
 
 /// A single drop slot: a [`SLOT_SIZE`] × [`SLOT_SIZE`] box centered at
 /// `position`. The brick occupying it, if any, is recorded in `occupied`.
-#[derive(Resource)]
+#[derive(Clone, Copy, Debug)]
 pub struct Slot {
     /// The slot's center.
     pub position: Vec3,
     /// The brick currently occupying the slot, if any.
     pub occupied: Option<Entity>,
+}
+
+/// The row of drop slots along the bottom of the window, left to right.
+#[derive(Resource)]
+pub struct Slots {
+    pub slots: Vec<Slot>,
 }
 
 /// Tracks the entity driving a brick's idle continuous spin, so it can be
@@ -180,6 +186,9 @@ const SLOT_SIZE: f32 = 100.0;
 /// Half the slot size, used as the drop-area radius from the slot center.
 const SLOT_HALF: f32 = SLOT_SIZE / 2.0;
 
+/// Number of drop slots in the row along the bottom of the window.
+const SLOT_COUNT: usize = 5;
+
 pub fn setup(mut commands: Commands, asset_server: Res<AssetServer>, windows: Query<&Window>) {
     let front = asset_server.load("sprites/Button.png");
     let back = asset_server.load("sprites/Button.png");
@@ -199,25 +208,36 @@ pub fn setup(mut commands: Commands, asset_server: Res<AssetServer>, windows: Qu
         bottom: -bottom_border,
     });
 
-    // Bottom slots strip: centered (in Y) between the window bottom and the
-    // bottom wall's inner edge, and offset from the left edge by the same side
-    // margin as the walls.
-    let slots = asset_server.load("sprites/slot.png");
+    // Bottom slots strip: a row of slots centered (in Y) between the window
+    // bottom and the bottom wall's inner edge, starting at the left with the
+    // same side margin as the walls. Each following slot is spaced to the right
+    // by the slot's own vertical distance to the window bottom.
+    let slots_image = asset_server.load("sprites/slot.png");
     let slots_y = (-half_height + -bottom_border) / 2.0;
     let slots_x = -border_x;
-    let slot_position = Vec3::new(slots_x, slots_y, -1.0);
-    commands.insert_resource(Slot {
-        position: slot_position,
-        occupied: None,
+    let slot_spacing = slots_y + half_height;
+    let mut slot_positions = Vec::with_capacity(SLOT_COUNT);
+    for i in 0..SLOT_COUNT {
+        let x = slots_x + i as f32 * slot_spacing;
+        slot_positions.push(Vec3::new(x, slots_y, -1.0));
+        commands.spawn((
+            Sprite {
+                image: slots_image.clone(),
+                custom_size: Some(Vec2::new(SLOT_SIZE, SLOT_SIZE)),
+                ..default()
+            },
+            Transform::from_xyz(x, slots_y, -1.0),
+        ));
+    }
+    commands.insert_resource(Slots {
+        slots: slot_positions
+            .into_iter()
+            .map(|position| Slot {
+                position,
+                occupied: None,
+            })
+            .collect(),
     });
-    commands.spawn((
-        Sprite {
-            image: slots,
-            custom_size: Some(Vec2::new(SLOT_SIZE, SLOT_SIZE)),
-            ..default()
-        },
-        Transform::from_xyz(slots_x, slots_y, -1.0),
-    ));
 
     let mut rng = rand::rng();
     for i in 0..BRICK_COUNT {
@@ -354,7 +374,7 @@ fn brick(
              mut query_vel: Query<&mut LinearVelocity>,
              query_parent: Query<&ChildOf>,
              query_spin: Query<&SpinAnimation>,
-             mut slot: ResMut<Slot>,
+             mut slots: ResMut<Slots>,
              mut commands: Commands| {
                 // Act on the brick itself (it owns the collider and velocity) rather
                 // than the pickable child face the pointer is on.
@@ -367,11 +387,13 @@ fn brick(
                     tracker.was_dragged = true;
                     if !tracker.dragging {
                         tracker.dragging = true;
-                        // If this brick owns the slot, release it: the brick is
-                        // being moved, so the slot reads as free until a brick
+                        // If this brick owns a slot, release it: the brick is
+                        // being moved, so that slot reads as free until a brick
                         // drops in again.
-                        if slot.occupied == Some(brick) {
-                            slot.occupied = None;
+                        for s in &mut slots.slots {
+                            if s.occupied == Some(brick) {
+                                s.occupied = None;
+                            }
                         }
                         // A return animation from a previous out-of-bounds drop
                         // is superseded by this new drag.
@@ -424,7 +446,7 @@ fn brick(
              query_angle: Query<&FlipAngle>,
              query_parent: Query<&ChildOf>,
              query_spin: Query<&SpinAnimation>,
-             mut slot: ResMut<Slot>,
+             mut slots: ResMut<Slots>,
              mut query_vel: Query<&mut LinearVelocity>| {
                 // Read event details
                 println!(
@@ -450,24 +472,29 @@ fn brick(
                             || t.x + half > bounds.half_width
                             || t.y + half > bounds.top
                             || t.y - half < bounds.bottom;
-                        // A drop over the slot is valid even though the slot sits
-                        // outside the walls (below the bottom border), so it is
-                        // tested before the out-of-bounds check.
-                        let on_slot = (t.x - slot.position.x).abs() <= SLOT_HALF
-                            && (t.y - slot.position.y).abs() <= SLOT_HALF;
-                        // The slot is free for this brick if it's empty or if this
-                        // brick is the one currently occupying it (re-dropped).
-                        let can_park = match slot.occupied {
-                            Some(occupied) => occupied == brick,
-                            None => true,
-                        };
-                        if on_slot {
+                        // A drop over any slot is valid even though the slots
+                        // sit outside the walls (below the bottom border), so
+                        // they're tested before the out-of-bounds check. Find
+                        // the first slot whose drop area contains the brick.
+                        let slot_index = slots.slots.iter().position(|s| {
+                            (t.x - s.position.x).abs() <= SLOT_HALF
+                                && (t.y - s.position.y).abs() <= SLOT_HALF
+                        });
+                        if let Some(idx) = slot_index {
+                            // The slot is free for this brick if it's empty or
+                            // if this brick is the one currently occupying it
+                            // (re-dropped).
+                            let can_park = match slots.slots[idx].occupied {
+                                Some(occupied) => occupied == brick,
+                                None => true,
+                            };
                             if can_park {
+                                let slot_position = slots.slots[idx].position;
                                 // Snap into the slot and freeze: a static body
                                 // keeps colliding but can't move; zero velocity,
                                 // no idle spin, and settle flat at angle 0.
                                 if let Ok(mut transform) = query_transform.get_mut(brick) {
-                                    transform.translation = slot.position;
+                                    transform.translation = slot_position;
                                 }
                                 commands.entity(brick).insert(RigidBody::Static);
                                 if let Ok(mut vel) = query_vel.get_mut(brick) {
@@ -478,7 +505,7 @@ fn brick(
                                 }
                                 commands.entity(brick).remove::<SpinAnimation>();
                                 tracker.had_spin = false;
-                                slot.occupied = Some(brick);
+                                slots.slots[idx].occupied = Some(brick);
                                 if let Ok(angle) = query_angle.get(brick) {
                                     settle_brick(&mut commands, brick, &angle);
                                 }
